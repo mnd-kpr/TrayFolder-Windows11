@@ -4,7 +4,7 @@
 // каскадным меню, как стрелка » у панелей инструментов в Windows 10:
 // подпапки раскрываются при наведении, клик по файлу открывает файл,
 // клик по папке открывает её в Проводнике. Средний клик по значку — открыть
-// папку целиком. Правый клик — служебное меню: вид значка, автозапуск, ещё папка, закрыть.
+// папку целиком. Правый клик — служебное меню: вид значка, язык, автозапуск, ещё папка, закрыть.
 //
 // Папки читаются в фоне: медленная сетевая или огромная папка не подвешивает программу,
 // а сначала показывает «Загрузка…». Если папка недоступна (вынули флешку, отвалилась сеть),
@@ -21,6 +21,8 @@
 // Каждая папка — отдельный значок, как отдельная панель инструментов.
 // Добавленная папка сама прописывается в автозапуск (снимается в меню правой кнопки).
 // Вид значка выбирается в меню правой кнопки → «Значок» и запоминается для каждой папки.
+// Язык интерфейса — по языку Windows; сменить его можно в меню правой кнопки → «Язык»,
+// выбор общий для всех значков. Переводы — в классе Lang, ближе к концу файла.
 
 using System;
 using System.Collections.Generic;
@@ -28,6 +30,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -40,8 +43,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("TrayFolder")]
 [assembly: AssemblyProduct("TrayFolder")]
 [assembly: AssemblyDescription("Папка в трее с раскрывающимся меню")]
-[assembly: AssemblyVersion("1.3.0.0")]
-[assembly: AssemblyFileVersion("1.3.0.0")]
+[assembly: AssemblyVersion("1.4.0.0")]
+[assembly: AssemblyFileVersion("1.4.0.0")]
 
 static class Program
 {
@@ -58,7 +61,7 @@ static class Program
         Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
         {
             Log.Error("Ошибка в программе", e.Exception);
-            Util.Message("Ошибка: " + e.Exception.Message + "\n\nПодробности записаны в журнал:\n" + Log.FilePath);
+            Util.Message(Lang.F("Crash", e.Exception.Message, Log.FilePath));
         };
         AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
         {
@@ -93,7 +96,7 @@ static class Program
 
         if (!fromStartup && !Directory.Exists(folder))
         {
-            Util.Message("Это не папка или она сейчас недоступна:\n" + folder);
+            Util.Message(Lang.F("NotAFolder", folder));
             return;
         }
 
@@ -103,7 +106,7 @@ static class Program
         {
             if (!createdNew)
             {
-                if (!fromStartup) Util.Message("Эта папка уже есть в трее:\n" + folder);
+                if (!fromStartup) Util.Message(Lang.F("AlreadyInTray", folder));
                 return;
             }
             if (!fromStartup) Util.SetAutostart(folder, true);
@@ -127,9 +130,13 @@ sealed class TrayFolderApp : IDisposable
     readonly NotifyIcon tray;
     readonly ContextMenuStrip folderMenu;
     readonly ContextMenuStrip serviceMenu;
-    readonly ToolStripMenuItem autostartItem;
+    readonly ToolStripMenuItem openItem;
+    readonly ToolStripMenuItem addItem;
     readonly ToolStripMenuItem iconMenu;
+    readonly ToolStripMenuItem languageMenu;
+    readonly ToolStripMenuItem autostartItem;
     readonly ToolStripMenuItem logItem;
+    readonly ToolStripMenuItem closeItem;
     readonly Size iconSize = SystemInformation.SmallIconSize;
     readonly IconCache iconCache = new IconCache();
     readonly Control ui = new Control();   // невидимый посредник: через него фоновые потоки возвращаются в поток меню
@@ -165,38 +172,77 @@ sealed class TrayFolderApp : IDisposable
         folderMenu.ImageScalingSize = iconSize;
         folderMenu.Closed += delegate { folderMenuClosedAt = DateTime.Now; };
 
-        iconMenu = new ToolStripMenuItem("Значок");
+        // Подписи пунктов служебного меню ставит ApplyLanguage — на выбранном языке
+        openItem = new ToolStripMenuItem();
+        openItem.Click += delegate { Shell.Open(this.folder); };
+
+        addItem = new ToolStripMenuItem();
+        addItem.Click += delegate { AddFolder(); };
+
+        iconMenu = new ToolStripMenuItem();
         iconMenu.DropDown.ImageScalingSize = iconSize;
         ToolStripDropDownMenu iconDropDown = iconMenu.DropDown as ToolStripDropDownMenu;
         if (iconDropDown != null) iconDropDown.ShowCheckMargin = true;   // галочка и превью рядом
         iconMenu.DropDownItems.Add(Placeholder("…"));
         iconMenu.DropDownOpening += delegate { FillIconMenu(); };
 
-        logItem = new ToolStripMenuItem("Журнал ошибок");
+        // Подменю «Язык»: каждый язык подписан на нём самом, текущий отмечен галочкой
+        languageMenu = new ToolStripMenuItem();
+        foreach (Lang.Language language in Lang.All)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(language.Name);
+            string code = language.Code;
+            item.Tag = code;
+            item.Click += delegate
+            {
+                Lang.Set(code);
+                ApplyLanguage();
+                UpdateTrayText();
+            };
+            languageMenu.DropDownItems.Add(item);
+        }
+        languageMenu.DropDownOpening += delegate
+        {
+            foreach (ToolStripItem item in languageMenu.DropDownItems)
+            {
+                ToolStripMenuItem choice = item as ToolStripMenuItem;
+                if (choice != null) choice.Checked = (string)choice.Tag == Lang.Current;
+            }
+        };
+
+        autostartItem = new ToolStripMenuItem();
+        autostartItem.Click += delegate { Util.SetAutostart(this.folder, !autostartItem.Checked); };
+
+        logItem = new ToolStripMenuItem();
         logItem.Click += delegate { Shell.Open(Log.FilePath); };
 
-        serviceMenu = new ContextMenuStrip();
-        serviceMenu.ImageScalingSize = iconSize;
-        serviceMenu.Items.Add("Открыть в Проводнике", null, delegate { Shell.Open(this.folder); });
-        serviceMenu.Items.Add("Добавить ещё папку…", null, delegate { AddFolder(); });
-        serviceMenu.Items.Add(iconMenu);
-        serviceMenu.Items.Add(new ToolStripSeparator());
-        autostartItem = new ToolStripMenuItem("Запускать вместе с Windows");
-        autostartItem.Click += delegate { Util.SetAutostart(this.folder, !autostartItem.Checked); };
-        serviceMenu.Items.Add(autostartItem);
-        serviceMenu.Items.Add(logItem);
-        serviceMenu.Items.Add("Закрыть", null, delegate
+        closeItem = new ToolStripMenuItem();
+        closeItem.Click += delegate
         {
             Util.MarkOpen(this.folder, false);   // закрыта вручную — после пересборки её возвращать не нужно
             tray.Visible = false;
             Application.Exit();
-        });
+        };
+
+        serviceMenu = new ContextMenuStrip();
+        serviceMenu.ImageScalingSize = iconSize;
+        serviceMenu.Items.Add(openItem);
+        serviceMenu.Items.Add(addItem);
+        serviceMenu.Items.Add(iconMenu);
+        serviceMenu.Items.Add(languageMenu);
+        serviceMenu.Items.Add(new ToolStripSeparator());
+        serviceMenu.Items.Add(autostartItem);
+        serviceMenu.Items.Add(logItem);
+        serviceMenu.Items.Add(closeItem);
         serviceMenu.Opening += delegate
         {
+            Lang.Refresh();   // язык могли сменить в меню другого значка
+            ApplyLanguage();
             ApplyTheme();
             autostartItem.Checked = Util.IsAutostart(this.folder);
             logItem.Visible = File.Exists(Log.FilePath);   // пункт появляется, только когда есть что посмотреть
         };
+        ApplyLanguage();
 
         tray = new NotifyIcon();
         tray.ContextMenuStrip = serviceMenu;
@@ -223,6 +269,7 @@ sealed class TrayFolderApp : IDisposable
         // Клик по значку при открытом меню должен просто закрыть меню, а не открыть его заново
         if ((DateTime.Now - folderMenuClosedAt).TotalMilliseconds < 300) return;
 
+        Lang.Refresh();   // язык могли сменить в меню другого значка
         ApplyTheme();
         iconCache.ReleaseRetired();   // меню закрыто — устаревшие картинки нигде не показываются
         rootMenuPoint = Cursor.Position;
@@ -251,6 +298,18 @@ sealed class TrayFolderApp : IDisposable
             Native.SetForegroundWindow(folderMenu.Handle);
             folderMenu.Show(Cursor.Position);
         }
+    }
+
+    // Подписи служебного меню на текущем языке; обновляются при каждом открытии меню
+    void ApplyLanguage()
+    {
+        openItem.Text = Lang.T("OpenInExplorer");
+        addItem.Text = Lang.T("AddFolder");
+        iconMenu.Text = Lang.T("Icon");
+        languageMenu.Text = Lang.T("Language");
+        autostartItem.Text = Lang.T("Autostart");
+        logItem.Text = Lang.T("ErrorLog");
+        closeItem.Text = Lang.T("Close");
     }
 
     // Светлое или тёмное меню — в тон панели задач; проверяется при каждом открытии
@@ -284,7 +343,7 @@ sealed class TrayFolderApp : IDisposable
         Task<Listing> load = LoadInBackground(node.Dir);
         if (load.Wait(QuickWaitMs)) { Fill(node, items, load.Result); return; }
 
-        SetPlaceholder(items, "Загрузка…");
+        SetPlaceholder(items, Lang.T("Loading"));
         load.ContinueWith(delegate(Task<Listing> done)
         {
             Listing listing = done.Result;
@@ -301,14 +360,14 @@ sealed class TrayFolderApp : IDisposable
 
         foreach (Entry entry in listing.Entries)
             items.Add(entry.IsDir ? MakeFolderItem(entry) : MakeFileItem(entry));
-        if (listing.Entries.Count == 0) items.Add(Placeholder("(пусто)"));
+        if (listing.Entries.Count == 0) items.Add(Placeholder(Lang.T("Empty")));
 
         if (listing.Truncated || listing.Hidden > 0)
         {
             items.Add(new ToolStripSeparator());
             string text = listing.Truncated
-                ? "Больше " + FolderReader.MaxScan.ToString("N0") + " элементов — открыть всю папку"
-                : "Ещё " + listing.Hidden + " — открыть всю папку";
+                ? Lang.F("MoreThan", FolderReader.MaxScan.ToString("N0"))
+                : Lang.F("MoreItems", listing.Hidden);
             ToolStripMenuItem more = new ToolStripMenuItem(text);
             string dir = node.Dir;
             more.Click += delegate { Shell.Open(dir); };
@@ -379,7 +438,7 @@ sealed class TrayFolderApp : IDisposable
             catch (Exception ex)
             {
                 Log.Error("Чтение папки " + dir, ex);
-                listing = Listing.Failed("(не удалось прочитать папку)");
+                listing = Listing.Failed(Lang.T("ReadFailed"));
             }
             result.SetResult(listing);
         });
@@ -450,6 +509,7 @@ sealed class TrayFolderApp : IDisposable
                 checking = false;
                 if (name != null) displayName = name;
                 if (exists != available) { available = exists; UpdateTrayIcon(); }
+                Lang.Refresh();   // подсказка у значка тоже переходит на язык, выбранный в другом значке
                 UpdateTrayText();
             });
         });
@@ -466,7 +526,7 @@ sealed class TrayFolderApp : IDisposable
 
     void UpdateTrayText()
     {
-        tray.Text = Util.Truncate(available ? displayName : displayName + " — недоступна", 63);   // больше 63 символов Windows не принимает
+        tray.Text = Util.TrayText(displayName, available);
     }
 
     // Подменю «Значок»: каждый вариант с живым превью, текущий отмечен галочкой
@@ -498,7 +558,7 @@ sealed class TrayFolderApp : IDisposable
         Icon icon = TrayIcons.Create(style, iconSize.Width, Util.IsDarkTaskbar(), !available);
         if (icon == null)
         {
-            Util.Message("Не получилось нарисовать значок. Подробности — в журнале ошибок.");
+            Util.Message(Lang.T("IconFailed"));
             return;
         }
         iconStyle = style;
@@ -610,9 +670,9 @@ static class FolderReader
                 else scan.Files.Add(entry);
             }
         }
-        catch (UnauthorizedAccessException) { scan.Error = "(нет доступа)"; return scan; }
-        catch (System.Security.SecurityException) { scan.Error = "(нет доступа)"; return scan; }
-        catch (IOException) { scan.Error = "(папка недоступна)"; scan.Missing = true; return scan; }
+        catch (UnauthorizedAccessException) { scan.Error = Lang.T("AccessDenied"); return scan; }
+        catch (System.Security.SecurityException) { scan.Error = Lang.T("AccessDenied"); return scan; }
+        catch (IOException) { scan.Error = Lang.T("FolderUnavailable"); scan.Missing = true; return scan; }
 
         Comparison<FileSystemInfo> byName = delegate(FileSystemInfo x, FileSystemInfo y)
         {
@@ -735,6 +795,288 @@ static class Log
     }
 }
 
+// Языки интерфейса. Пока язык не выбран в меню «Язык», берётся язык Windows, а если перевода
+// на него нет — английский. Выбор хранится в HKCU\Software\TrayFolder (значение Language)
+// и общий для всех значков. Журнал ошибок не переводится: он для разработчика.
+// Чтобы добавить язык, скопируйте блок English, переведите строки и добавьте блок в список All.
+static class Lang
+{
+    public sealed class Language
+    {
+        public readonly string Code;   // двухбуквенный код, как у языков Windows: ru, en, de…
+        public readonly string Name;   // самоназвание — так язык подписан в меню
+        public readonly Dictionary<string, string> Text;
+
+        public Language(string code, string name, Dictionary<string, string> text)
+        {
+            Code = code;
+            Name = name;
+            Text = text;
+        }
+    }
+
+    const string SettingsKey = @"Software\TrayFolder";
+    const string SettingName = "Language";
+
+    static readonly Language Russian = new Language("ru", "Русский", new Dictionary<string, string>
+    {
+        { "OpenInExplorer", "Открыть в Проводнике" },
+        { "AddFolder", "Добавить ещё папку…" },
+        { "Icon", "Значок" },
+        { "Language", "Язык" },
+        { "Autostart", "Запускать вместе с Windows" },
+        { "ErrorLog", "Журнал ошибок" },
+        { "Close", "Закрыть" },
+        { "Loading", "Загрузка…" },
+        { "Empty", "(пусто)" },
+        { "MoreThan", "Больше {0} элементов — открыть всю папку" },
+        { "MoreItems", "Ещё {0} — открыть всю папку" },
+        { "ReadFailed", "(не удалось прочитать папку)" },
+        { "AccessDenied", "(нет доступа)" },
+        { "FolderUnavailable", "(папка недоступна)" },
+        { "UnavailableMark", " — недоступна" },
+        { "IconFailed", "Не получилось нарисовать значок. Подробности — в журнале ошибок." },
+        { "Crash", "Ошибка: {0}\n\nПодробности записаны в журнал:\n{1}" },
+        { "NotAFolder", "Это не папка или она сейчас недоступна:\n{0}" },
+        { "AlreadyInTray", "Эта папка уже есть в трее:\n{0}" },
+        { "AutostartFailed", "Не удалось изменить автозапуск: {0}" },
+        { "IconSaveFailed", "Значок сменился, но запомнить выбор не удалось: {0}" },
+        { "LanguageSaveFailed", "Язык сменился, но запомнить выбор не удалось: {0}" },
+        { "PickFolder", "Какую папку показать в трее у часов?" },
+        { "Style.chevron", "Папка со стрелкой »" },
+        { "Style.outline-chevron", "Контурная папка со стрелкой »" },
+        { "Style.outline", "Контурная папка, как значки Windows" },
+        { "Style.arrows", "Стрелка », как у старых панелей" },
+    });
+
+    static readonly Language English = new Language("en", "English", new Dictionary<string, string>
+    {
+        { "OpenInExplorer", "Open in File Explorer" },
+        { "AddFolder", "Add another folder…" },
+        { "Icon", "Icon" },
+        { "Language", "Language" },
+        { "Autostart", "Start with Windows" },
+        { "ErrorLog", "Error log" },
+        { "Close", "Close" },
+        { "Loading", "Loading…" },
+        { "Empty", "(empty)" },
+        { "MoreThan", "More than {0} items — open the whole folder" },
+        { "MoreItems", "{0} more — open the whole folder" },
+        { "ReadFailed", "(couldn't read the folder)" },
+        { "AccessDenied", "(access denied)" },
+        { "FolderUnavailable", "(folder unavailable)" },
+        { "UnavailableMark", " — unavailable" },
+        { "IconFailed", "Couldn't draw the icon. See the error log for details." },
+        { "Crash", "Error: {0}\n\nDetails have been written to the log:\n{1}" },
+        { "NotAFolder", "This isn't a folder, or it's unavailable right now:\n{0}" },
+        { "AlreadyInTray", "This folder is already in the system tray:\n{0}" },
+        { "AutostartFailed", "Couldn't change the startup setting: {0}" },
+        { "IconSaveFailed", "The icon has changed, but the choice couldn't be saved: {0}" },
+        { "LanguageSaveFailed", "The language has changed, but the choice couldn't be saved: {0}" },
+        { "PickFolder", "Which folder should appear in the system tray next to the clock?" },
+        { "Style.chevron", "Folder with » arrow" },
+        { "Style.outline-chevron", "Folder outline with » arrow" },
+        { "Style.outline", "Folder outline, like Windows icons" },
+        { "Style.arrows", "» arrow, like the old toolbars" },
+    });
+
+    static readonly Language German = new Language("de", "Deutsch", new Dictionary<string, string>
+    {
+        { "OpenInExplorer", "Im Datei-Explorer öffnen" },
+        { "AddFolder", "Weiteren Ordner hinzufügen…" },
+        { "Icon", "Symbol" },
+        { "Language", "Sprache" },
+        { "Autostart", "Mit Windows starten" },
+        { "ErrorLog", "Fehlerprotokoll" },
+        { "Close", "Schließen" },
+        { "Loading", "Wird geladen…" },
+        { "Empty", "(leer)" },
+        { "MoreThan", "Mehr als {0} Elemente – ganzen Ordner öffnen" },
+        { "MoreItems", "{0} weitere – ganzen Ordner öffnen" },
+        { "ReadFailed", "(Ordner konnte nicht gelesen werden)" },
+        { "AccessDenied", "(Zugriff verweigert)" },
+        { "FolderUnavailable", "(Ordner nicht verfügbar)" },
+        { "UnavailableMark", " – nicht verfügbar" },
+        { "IconFailed", "Das Symbol konnte nicht gezeichnet werden. Details stehen im Fehlerprotokoll." },
+        { "Crash", "Fehler: {0}\n\nDetails wurden ins Protokoll geschrieben:\n{1}" },
+        { "NotAFolder", "Das ist kein Ordner, oder er ist gerade nicht verfügbar:\n{0}" },
+        { "AlreadyInTray", "Dieser Ordner ist bereits im Infobereich:\n{0}" },
+        { "AutostartFailed", "Der Autostart konnte nicht geändert werden: {0}" },
+        { "IconSaveFailed", "Das Symbol wurde geändert, aber die Auswahl konnte nicht gespeichert werden: {0}" },
+        { "LanguageSaveFailed", "Die Sprache wurde geändert, aber die Auswahl konnte nicht gespeichert werden: {0}" },
+        { "PickFolder", "Welcher Ordner soll im Infobereich neben der Uhr erscheinen?" },
+        { "Style.chevron", "Ordner mit Pfeil »" },
+        { "Style.outline-chevron", "Ordnerumriss mit Pfeil »" },
+        { "Style.outline", "Ordnerumriss wie die Windows-Symbole" },
+        { "Style.arrows", "Pfeil » wie bei den alten Symbolleisten" },
+    });
+
+    // Во французском перед двоеточием и вопросительным знаком ставится неразрывный пробел (\u00A0)
+    static readonly Language French = new Language("fr", "Français", new Dictionary<string, string>
+    {
+        { "OpenInExplorer", "Ouvrir dans l'Explorateur de fichiers" },
+        { "AddFolder", "Ajouter un autre dossier…" },
+        { "Icon", "Icône" },
+        { "Language", "Langue" },
+        { "Autostart", "Lancer au démarrage de Windows" },
+        { "ErrorLog", "Journal des erreurs" },
+        { "Close", "Fermer" },
+        { "Loading", "Chargement…" },
+        { "Empty", "(vide)" },
+        { "MoreThan", "Plus de {0} éléments – ouvrir tout le dossier" },
+        { "MoreItems", "{0} de plus – ouvrir tout le dossier" },
+        { "ReadFailed", "(impossible de lire le dossier)" },
+        { "AccessDenied", "(accès refusé)" },
+        { "FolderUnavailable", "(dossier indisponible)" },
+        { "UnavailableMark", " – indisponible" },
+        { "IconFailed", "Impossible de dessiner l'icône. Les détails se trouvent dans le journal des erreurs." },
+        { "Crash", "Erreur\u00A0: {0}\n\nLes détails ont été enregistrés dans le journal\u00A0:\n{1}" },
+        { "NotAFolder", "Ce n'est pas un dossier, ou il est indisponible pour le moment\u00A0:\n{0}" },
+        { "AlreadyInTray", "Ce dossier est déjà dans la zone de notification\u00A0:\n{0}" },
+        { "AutostartFailed", "Impossible de modifier le lancement au démarrage\u00A0: {0}" },
+        { "IconSaveFailed", "L'icône a changé, mais le choix n'a pas pu être enregistré\u00A0: {0}" },
+        { "LanguageSaveFailed", "La langue a changé, mais le choix n'a pas pu être enregistré\u00A0: {0}" },
+        { "PickFolder", "Quel dossier afficher dans la zone de notification, près de l'horloge\u00A0?" },
+        { "Style.chevron", "Dossier avec flèche »" },
+        { "Style.outline-chevron", "Contour de dossier avec flèche »" },
+        { "Style.outline", "Contour de dossier, comme les icônes de Windows" },
+        { "Style.arrows", "Flèche », comme les anciennes barres d'outils" },
+    });
+
+    static readonly Language Spanish = new Language("es", "Español", new Dictionary<string, string>
+    {
+        { "OpenInExplorer", "Abrir en el Explorador de archivos" },
+        { "AddFolder", "Agregar otra carpeta…" },
+        { "Icon", "Icono" },
+        { "Language", "Idioma" },
+        { "Autostart", "Iniciar con Windows" },
+        { "ErrorLog", "Registro de errores" },
+        { "Close", "Cerrar" },
+        { "Loading", "Cargando…" },
+        { "Empty", "(vacía)" },
+        { "MoreThan", "Más de {0} elementos — abrir toda la carpeta" },
+        { "MoreItems", "{0} más — abrir toda la carpeta" },
+        { "ReadFailed", "(no se pudo leer la carpeta)" },
+        { "AccessDenied", "(acceso denegado)" },
+        { "FolderUnavailable", "(carpeta no disponible)" },
+        { "UnavailableMark", " — no disponible" },
+        { "IconFailed", "No se pudo dibujar el icono. Los detalles están en el registro de errores." },
+        { "Crash", "Error: {0}\n\nLos detalles se guardaron en el registro:\n{1}" },
+        { "NotAFolder", "No es una carpeta o no está disponible en este momento:\n{0}" },
+        { "AlreadyInTray", "Esta carpeta ya está en el área de notificación:\n{0}" },
+        { "AutostartFailed", "No se pudo cambiar el inicio con Windows: {0}" },
+        { "IconSaveFailed", "El icono cambió, pero no se pudo guardar la elección: {0}" },
+        { "LanguageSaveFailed", "El idioma cambió, pero no se pudo guardar la elección: {0}" },
+        { "PickFolder", "¿Qué carpeta se mostrará en el área de notificación, junto al reloj?" },
+        { "Style.chevron", "Carpeta con flecha »" },
+        { "Style.outline-chevron", "Contorno de carpeta con flecha »" },
+        { "Style.outline", "Contorno de carpeta, como los iconos de Windows" },
+        { "Style.arrows", "Flecha », como las antiguas barras de herramientas" },
+    });
+
+    static readonly Language Italian = new Language("it", "Italiano", new Dictionary<string, string>
+    {
+        { "OpenInExplorer", "Apri in Esplora file" },
+        { "AddFolder", "Aggiungi un'altra cartella…" },
+        { "Icon", "Icona" },
+        { "Language", "Lingua" },
+        { "Autostart", "Avvia con Windows" },
+        { "ErrorLog", "Registro errori" },
+        { "Close", "Chiudi" },
+        { "Loading", "Caricamento…" },
+        { "Empty", "(vuota)" },
+        { "MoreThan", "Più di {0} elementi – apri l'intera cartella" },
+        { "MoreItems", "Altri {0} – apri l'intera cartella" },
+        { "ReadFailed", "(impossibile leggere la cartella)" },
+        { "AccessDenied", "(accesso negato)" },
+        { "FolderUnavailable", "(cartella non disponibile)" },
+        { "UnavailableMark", " – non disponibile" },
+        { "IconFailed", "Impossibile disegnare l'icona. I dettagli sono nel registro errori." },
+        { "Crash", "Errore: {0}\n\nI dettagli sono stati scritti nel registro:\n{1}" },
+        { "NotAFolder", "Non è una cartella oppure al momento non è disponibile:\n{0}" },
+        { "AlreadyInTray", "Questa cartella è già nell'area di notifica:\n{0}" },
+        { "AutostartFailed", "Impossibile modificare l'avvio con Windows: {0}" },
+        { "IconSaveFailed", "L'icona è cambiata, ma non è stato possibile salvare la scelta: {0}" },
+        { "LanguageSaveFailed", "La lingua è cambiata, ma non è stato possibile salvare la scelta: {0}" },
+        { "PickFolder", "Quale cartella mostrare nell'area di notifica, accanto all'orologio?" },
+        { "Style.chevron", "Cartella con freccia »" },
+        { "Style.outline-chevron", "Contorno di cartella con freccia »" },
+        { "Style.outline", "Contorno di cartella, come le icone di Windows" },
+        { "Style.arrows", "Freccia », come le vecchie barre degli strumenti" },
+    });
+
+    // Порядок в меню «Язык» — по алфавиту самоназваний, как в списке языков Windows
+    public static readonly Language[] All = { German, English, Spanish, French, Italian, Russian };
+
+    static volatile Language current = Detect();
+    static Language unsaved;   // язык, выбранный в меню, если записать выбор в реестр не удалось
+
+    // Код текущего языка: ru, en, de…
+    public static string Current { get { return current.Code; } }
+
+    // Перечитать выбор: язык могли сменить в меню другого значка
+    public static void Refresh() { current = Detect(); }
+
+    public static string T(string key)
+    {
+        string text;
+        if (current.Text.TryGetValue(key, out text)) return text;
+        if (English.Text.TryGetValue(key, out text)) return text;   // на случай неполного перевода
+        return key;
+    }
+
+    public static string F(string key, params object[] args)
+    {
+        return string.Format(T(key), args);
+    }
+
+    public static void Set(string code)
+    {
+        Language chosen = Find(code);
+        if (chosen == null) return;
+        current = chosen;
+        unsaved = null;
+        try
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(SettingsKey))
+                key.SetValue(SettingName, chosen.Code);
+        }
+        catch (Exception ex)
+        {
+            unsaved = chosen;   // до закрытия программы язык всё равно останется выбранным
+            Log.Error("Сохранение языка", ex);
+            Util.Message(F("LanguageSaveFailed", ex.Message));
+        }
+    }
+
+    public static Language Find(string code)
+    {
+        if (string.IsNullOrEmpty(code)) return null;
+        foreach (Language language in All)
+            if (string.Equals(language.Code, code, StringComparison.OrdinalIgnoreCase)) return language;
+        return null;
+    }
+
+    // Язык, выбранный в меню, иначе язык Windows, иначе английский
+    static Language Detect()
+    {
+        return unsaved
+            ?? Find(SavedCode())
+            ?? Find(CultureInfo.CurrentUICulture.TwoLetterISOLanguageName)
+            ?? English;
+    }
+
+    static string SavedCode()
+    {
+        try
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(SettingsKey))
+                return key == null ? null : key.GetValue(SettingName) as string;
+        }
+        catch { return null; }
+    }
+}
+
 // Значки для трея, нарисованные кодом под точный размер значка в трее
 // (16 px при масштабе 100 %, 20 px при 125 %, 24 px при 150 %), поэтому они всегда чёткие
 // и сами перекрашиваются под светлую или тёмную панель задач, как значки самой Windows.
@@ -748,16 +1090,10 @@ static class TrayIcons
 
     public static bool IsKnown(string style) { return Array.IndexOf(Styles, style) >= 0; }
 
+    // Название варианта в меню — на текущем языке (переводы — в Lang, ключи "Style.<вариант>")
     public static string Title(string style)
     {
-        switch (style)
-        {
-            case "chevron": return "Папка со стрелкой »";
-            case "outline-chevron": return "Контурная папка со стрелкой »";
-            case "outline": return "Контурная папка, как значки Windows";
-            case "arrows": return "Стрелка », как у старых панелей";
-        }
-        return style;
+        return Lang.T("Style." + style);
     }
 
     // Значок для трея; dimmed — приглушённый, для недоступной папки. null — если нарисовать не удалось
@@ -1324,7 +1660,7 @@ static class Util
         catch (Exception ex)
         {
             Log.Error("Автозапуск", ex);
-            Message("Не удалось изменить автозапуск: " + ex.Message);
+            Message(Lang.F("AutostartFailed", ex.Message));
         }
     }
 
@@ -1353,7 +1689,7 @@ static class Util
         catch (Exception ex)
         {
             Log.Error("Сохранение вида значка", ex);
-            Message("Значок сменился, но запомнить выбор не удалось: " + ex.Message);
+            Message(Lang.F("IconSaveFailed", ex.Message));
         }
     }
 
@@ -1402,7 +1738,7 @@ static class Util
     {
         using (FolderBrowserDialog dialog = new FolderBrowserDialog())
         {
-            dialog.Description = "Какую папку показать в трее у часов?";
+            dialog.Description = Lang.T("PickFolder");
             if (!string.IsNullOrEmpty(initial)) dialog.SelectedPath = initial;
             return dialog.ShowDialog() == DialogResult.OK ? dialog.SelectedPath : null;
         }
@@ -1442,6 +1778,17 @@ static class Util
     public static string Truncate(string s, int max)
     {
         return s.Length <= max ? s : s.Substring(0, max - 1) + "…";
+    }
+
+    // Подсказка у значка в трее. Больше 63 символов Windows не принимает, поэтому у недоступной
+    // папки укорачивается имя, а пометка «недоступна» остаётся целой
+    public const int TrayTextMax = 63;
+
+    public static string TrayText(string name, bool available)
+    {
+        if (available) return Truncate(name, TrayTextMax);
+        string mark = Lang.T("UnavailableMark");
+        return Truncate(name, TrayTextMax - mark.Length) + mark;
     }
 
     public static void Message(string text)
