@@ -1,0 +1,6 @@
+# Bat-файлы Windows должны оставаться с переводами строк CRLF, иначе cmd может разобрать их неверно
+*.bat text eol=crlf
+*.cs  text eol=crlf
+*.md  text
+*.yml text
+*.png binary

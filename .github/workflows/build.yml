@@ -1,0 +1,37 @@
+# Сборка TrayFolder на машине GitHub с Windows — тем же build.bat и тем же встроенным
+# компилятором, что и у пользователей. Каждое изменение проверяется сборкой,
+# а к опубликованному релизу автоматически прикладывается готовый TrayFolder.exe.
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write   # нужно, чтобы приложить exe к релизу
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build with the C# compiler built into Windows
+        shell: cmd
+        run: build.bat
+
+      - name: Keep the exe as a build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: TrayFolder
+          path: TrayFolder.exe
+
+      - name: Attach the exe to the release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" TrayFolder.exe --clobber --repo "${{ github.repository }}"
