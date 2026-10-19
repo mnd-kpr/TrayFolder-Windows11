@@ -43,8 +43,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("TrayFolder")]
 [assembly: AssemblyProduct("TrayFolder")]
 [assembly: AssemblyDescription("Папка в трее с раскрывающимся меню")]
-[assembly: AssemblyVersion("1.4.0.0")]
-[assembly: AssemblyFileVersion("1.4.0.0")]
+[assembly: AssemblyVersion("1.4.1.0")]
+[assembly: AssemblyFileVersion("1.4.1.0")]
 
 static class Program
 {
@@ -143,19 +143,16 @@ sealed class TrayFolderApp : IDisposable
     readonly System.Windows.Forms.Timer availabilityTimer = new System.Windows.Forms.Timer();
     readonly UserPreferenceChangedEventHandler onPreferenceChanged;
 
-    // Закрытый метод NotifyIcon, которым он сам показывает меню по правому клику:
-    // делает меню активным окном и правильно ставит его над панелью задач.
-    readonly MethodInfo showContextMenu =
-        typeof(NotifyIcon).GetMethod("ShowContextMenu", BindingFlags.Instance | BindingFlags.NonPublic);
-
     FlatRenderer renderer;
     DateTime folderMenuClosedAt = DateTime.MinValue;
-    Point rootMenuPoint;
+    DateTime serviceMenuClosedAt = DateTime.MinValue;
+    Rectangle rootAnchor;   // значок, от которого открыто меню папки
     string displayName;
     string iconStyle;
     Icon trayIcon;
     bool available = true;
     bool checking;
+    Color globeInk;   // каким цветом нарисован глобус у пункта «Язык»
 
     public TrayFolderApp(string folder)
     {
@@ -181,16 +178,16 @@ sealed class TrayFolderApp : IDisposable
 
         iconMenu = new ToolStripMenuItem();
         iconMenu.DropDown.ImageScalingSize = iconSize;
-        ToolStripDropDownMenu iconDropDown = iconMenu.DropDown as ToolStripDropDownMenu;
-        if (iconDropDown != null) iconDropDown.ShowCheckMargin = true;   // галочка и превью рядом
         iconMenu.DropDownItems.Add(Placeholder("…"));
         iconMenu.DropDownOpening += delegate { FillIconMenu(); };
 
         // Подменю «Язык»: каждый язык подписан на нём самом, текущий отмечен галочкой
         languageMenu = new ToolStripMenuItem();
+        languageMenu.DropDown.ImageScalingSize = iconSize;
         foreach (Lang.Language language in Lang.All)
         {
-            ToolStripMenuItem item = new ToolStripMenuItem(language.Name);
+            // Пустая картинка нужна только для того, чтобы место слева было таким же, как в других меню
+            ToolStripMenuItem item = new ToolStripMenuItem(language.Name, BlankImage());
             string code = language.Code;
             item.Tag = code;
             item.Click += delegate
@@ -234,18 +231,12 @@ sealed class TrayFolderApp : IDisposable
         serviceMenu.Items.Add(autostartItem);
         serviceMenu.Items.Add(logItem);
         serviceMenu.Items.Add(closeItem);
-        serviceMenu.Opening += delegate
-        {
-            Lang.Refresh();   // язык могли сменить в меню другого значка
-            ApplyLanguage();
-            ApplyTheme();
-            autostartItem.Checked = Util.IsAutostart(this.folder);
-            logItem.Visible = File.Exists(Log.FilePath);   // пункт появляется, только когда есть что посмотреть
-        };
+        serviceMenu.Opening += delegate { PrepareServiceMenu(); };
+        serviceMenu.Closed += delegate { serviceMenuClosedAt = DateTime.Now; };
         ApplyLanguage();
 
+        // Оба меню показывает сама программа, а не NotifyIcon: так их можно ставить от значка
         tray = new NotifyIcon();
-        tray.ContextMenuStrip = serviceMenu;
         tray.MouseClick += OnTrayClick;
         UpdateTrayText();
         UpdateTrayIcon();
@@ -264,40 +255,64 @@ sealed class TrayFolderApp : IDisposable
     void OnTrayClick(object sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Middle) { Shell.Open(folder); return; }
-        if (e.Button != MouseButtons.Left) return;
 
         // Клик по значку при открытом меню должен просто закрыть меню, а не открыть его заново
+        if (e.Button == MouseButtons.Right)
+        {
+            if ((DateTime.Now - serviceMenuClosedAt).TotalMilliseconds < 300) return;
+            PrepareServiceMenu();
+            ShowAtIcon(serviceMenu, TrayAnchor(), false);   // служебное меню растёт вправо от значка
+            return;
+        }
+        if (e.Button != MouseButtons.Left) return;
         if ((DateTime.Now - folderMenuClosedAt).TotalMilliseconds < 300) return;
 
         Lang.Refresh();   // язык могли сменить в меню другого значка
         ApplyTheme();
         iconCache.ReleaseRetired();   // меню закрыто — устаревшие картинки нигде не показываются
-        rootMenuPoint = Cursor.Position;
+        rootAnchor = TrayAnchor();
         OpenListing(rootNode, folderMenu.Items, delegate(Listing listing)
         {
             if (!folderMenu.Visible) { NoteRootStatus(listing); return; }
-            // Папка дочиталась, пока висело «Загрузка…»: подставляем содержимое в открытое меню
-            // и сдвигаем его так, чтобы, выросши, оно по-прежнему стояло над значком и не уходило за экран
+            // Папка дочиталась, пока висело «Загрузка…»: подставляем содержимое в открытое меню,
+            // и оно растёт вверх от той же точки над значком
             Fill(rootNode, folderMenu.Items, listing);
             folderMenu.PerformLayout();
-            Rectangle area = Screen.FromPoint(rootMenuPoint).WorkingArea;
-            Size size = folderMenu.Size;
-            folderMenu.Location = new Point(
-                Math.Max(area.Left, Math.Min(rootMenuPoint.X - size.Width, area.Right - size.Width)),
-                Math.Max(area.Top, Math.Min(rootMenuPoint.Y - size.Height, area.Bottom - size.Height)));
+            folderMenu.Location = TrayPlacement.MenuLocation(rootAnchor, folderMenu.Size, true);
         });
+        ShowAtIcon(folderMenu, rootAnchor, true);   // меню папки растёт влево от значка
+    }
 
-        if (showContextMenu != null)
-        {
-            tray.ContextMenuStrip = folderMenu;
-            try { showContextMenu.Invoke(tray, null); }
-            finally { tray.ContextMenuStrip = serviceMenu; }
-        }
-        else
-        {
-            Native.SetForegroundWindow(folderMenu.Handle);
-            folderMenu.Show(Cursor.Position);
-        }
+    // Опора для меню — значок в трее, а если Windows не сообщила, где он, — точка курсора
+    Rectangle TrayAnchor()
+    {
+        Rectangle icon = TrayPlacement.IconRect(tray);
+        return icon.IsEmpty ? new Rectangle(Cursor.Position, new Size(1, 1)) : icon;
+    }
+
+    // Меню встаёт нижним краем на верхний край панели задач, а по горизонтали — от края значка
+    // (правило — в TrayPlacement). Перед показом активным делается окно значка, как это делает
+    // сам NotifyIcon: иначе меню не закроется щелчком мимо него
+    void ShowAtIcon(ContextMenuStrip menu, Rectangle anchor, bool growLeft)
+    {
+        Size size = menu.GetPreferredSize(Size.Empty);
+        IntPtr owner = TrayPlacement.TrayWindow(tray);
+        try { Native.SetForegroundWindow(owner != IntPtr.Zero ? owner : menu.Handle); }
+        catch (EntryPointNotFoundException) { }   // не Windows — меню всё равно откроется
+        menu.Show(TrayPlacement.MenuLocation(anchor, size, growLeft));
+        // При показе меню оказалось другого размера — ставим его заново, иначе край уедет от значка
+        if (menu.Size != size) menu.Location = TrayPlacement.MenuLocation(anchor, menu.Size, growLeft);
+    }
+
+    // Служебное меню готовится до того, как известен его размер: язык, тема, глобус, галочки
+    void PrepareServiceMenu()
+    {
+        Lang.Refresh();   // язык могли сменить в меню другого значка
+        ApplyLanguage();
+        ApplyTheme();
+        UpdateLanguageIcon();
+        autostartItem.Checked = Util.IsAutostart(this.folder);
+        logItem.Visible = File.Exists(Log.FilePath);   // пункт появляется, только когда есть что посмотреть
     }
 
     // Подписи служебного меню на текущем языке; обновляются при каждом открытии меню
@@ -310,6 +325,29 @@ sealed class TrayFolderApp : IDisposable
         autostartItem.Text = Lang.T("Autostart");
         logItem.Text = Lang.T("ErrorLog");
         closeItem.Text = Lang.T("Close");
+    }
+
+    Image blank;
+    Image BlankImage()
+    {
+        if (blank == null) blank = new Bitmap(iconSize.Width, iconSize.Height, PixelFormat.Format32bppArgb);
+        return blank;
+    }
+
+    // Глобус у пункта «Язык»: его узнают, даже если интерфейс на незнакомом языке.
+    // Перерисовывается, когда меню сменило цвет
+    void UpdateLanguageIcon()
+    {
+        Color ink = renderer != null ? renderer.Fore : SystemColors.MenuText;
+        if (languageMenu.Image != null && ink == globeInk) return;
+        Image old = languageMenu.Image;
+        try
+        {
+            languageMenu.Image = MenuIcons.Globe(iconSize.Width, ink);
+            globeInk = ink;
+        }
+        catch (Exception ex) { Log.Error("Значок пункта «Язык»", ex); return; }   // без глобуса меню всё равно работает
+        if (old != null) old.Dispose();
     }
 
     // Светлое или тёмное меню — в тон панели задач; проверяется при каждом открытии
@@ -545,12 +583,25 @@ sealed class TrayFolderApp : IDisposable
         bool dark = Util.IsDarkTaskbar();
         foreach (string style in TrayIcons.Styles)
         {
-            ToolStripMenuItem item = new ToolStripMenuItem(TrayIcons.Title(style), TrayIcons.Draw(style, iconSize.Width, dark));
+            ToolStripMenuItem item = new ToolStripMenuItem(TrayIcons.Title(style), TwoCellImage(TrayIcons.Draw(style, iconSize.Width, dark)));
+            item.ImageScaling = ToolStripItemImageScaling.None;   // картинка шириной в две ячейки, без растягивания
             item.Checked = iconStyle == style;
             string chosen = style;
             item.Click += delegate { ApplyIconStyle(chosen); };
             items.Add(item);
         }
+    }
+
+    // Слева в меню «Значок» две ячейки — галочка и превью. Картинка пункта шириной в обе ячейки
+    // с промежутком (превью — в правой), поэтому Windows оставляет под них место; рисует их FlatRenderer
+    Bitmap TwoCellImage(Bitmap preview)
+    {
+        Bitmap wide = new Bitmap(FlatRenderer.TwoCells(iconSize).Width, iconSize.Height, PixelFormat.Format32bppArgb);
+        if (preview == null) return wide;
+        using (preview)
+        using (Graphics g = Graphics.FromImage(wide))
+            g.DrawImageUnscaled(preview, wide.Width - preview.Width, 0);
+        return wide;
     }
 
     void ApplyIconStyle(string style)
@@ -596,6 +647,8 @@ sealed class TrayFolderApp : IDisposable
         tray.Visible = false;
         tray.Dispose();
         folderMenu.Dispose();
+        if (languageMenu.Image != null) languageMenu.Image.Dispose();
+        if (blank != null) blank.Dispose();
         serviceMenu.Dispose();
         ui.Dispose();
         if (trayIcon != null) trayIcon.Dispose();
@@ -1371,11 +1424,114 @@ static class TrayIcons
     }
 }
 
-// Плоское меню в духе Windows 11: светлое или тёмное, со скруглённой подсветкой пункта
+// Значки для пунктов меню: знаки из системного шрифта значков Windows, как в меню самой Windows 11.
+// Если шрифта нет, знак рисуется кодом
+static class MenuIcons
+{
+    const char GlobeGlyph = '';   // «Глобус»
+    const char CheckGlyph = '';   // «Галочка»
+    static readonly string[] IconFonts = { "Segoe Fluent Icons", "Segoe MDL2 Assets" };   // Windows 11, Windows 10
+
+    // Глобус для пункта «Язык»: 14 px из 16, как значки Windows
+    public static Bitmap Globe(int size, Color ink)
+    {
+        return Draw(GlobeGlyph, size, 14f / 16f, ink, DrawGlobe);
+    }
+
+    // Галочка выбранного пункта: 12 px из 16
+    public static Bitmap Check(int size, Color ink)
+    {
+        return Draw(CheckGlyph, size, 12f / 16f, ink, DrawCheck);
+    }
+
+    delegate void Fallback(Graphics g, Color ink, int size);
+
+    static Bitmap Draw(char glyph, int size, float fill, Color ink, Fallback fallback)
+    {
+        Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+        using (Graphics g = Graphics.FromImage(bmp))
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            using (GraphicsPath path = GlyphPath(glyph, size, fill))
+            {
+                if (path != null)
+                {
+                    using (SolidBrush brush = new SolidBrush(ink)) g.FillPath(brush, path);
+                    return bmp;
+                }
+            }
+            fallback(g, ink, size);
+        }
+        return bmp;
+    }
+
+    // Контур знака из шрифта значков, вписанный в квадрат size×size точно по центру; null — шрифта нет
+    static GraphicsPath GlyphPath(char glyph, int size, float fill)
+    {
+        foreach (string name in IconFonts)
+        {
+            FontFamily family;
+            try { family = new FontFamily(name); }
+            catch (ArgumentException) { continue; }
+            using (family)
+            {
+                if (!string.Equals(family.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+                GraphicsPath path = new GraphicsPath();
+                path.AddString(glyph.ToString(), family, (int)FontStyle.Regular, size, PointF.Empty, StringFormat.GenericTypographic);
+                RectangleF bounds = path.GetBounds();
+                if (bounds.Width <= 0 || bounds.Height <= 0) { path.Dispose(); continue; }
+                float k = size * fill / Math.Max(bounds.Width, bounds.Height);
+                using (Matrix m = new Matrix())
+                {
+                    m.Translate(size / 2f, size / 2f);
+                    m.Scale(k, k);
+                    m.Translate(-(bounds.X + bounds.Width / 2), -(bounds.Y + bounds.Height / 2));
+                    path.Transform(m);
+                }
+                return path;
+            }
+        }
+        return null;
+    }
+
+    static void DrawGlobe(Graphics g, Color ink, int size)
+    {
+        float s = size / 16f;
+        RectangleF r = new RectangleF(1.5f * s, 1.5f * s, 13 * s, 13 * s);
+        using (Pen pen = new Pen(ink, Math.Max(1f, s)))
+        {
+            g.DrawEllipse(pen, r);
+            g.DrawEllipse(pen, r.X + r.Width * 0.28f, r.Y, r.Width * 0.44f, r.Height);
+            g.DrawLine(pen, r.Left, r.Y + r.Height / 2, r.Right, r.Y + r.Height / 2);
+        }
+    }
+
+    static void DrawCheck(Graphics g, Color ink, int size)
+    {
+        float s = size / 16f;
+        using (Pen pen = new Pen(ink, Math.Max(1f, 1.2f * s)))
+        {
+            pen.LineJoin = LineJoin.Round;
+            pen.StartCap = LineCap.Round;
+            pen.EndCap = LineCap.Round;
+            g.DrawLines(pen, new PointF[] { new PointF(2.5f * s, 8.5f * s), new PointF(6f * s, 12f * s), new PointF(13.5f * s, 4f * s) });
+        }
+    }
+}
+
+// Плоское меню в духе Windows 11: светлое или тёмное, со скруглённой подсветкой пункта.
+// Значки и галочки стоят ровно посередине свободного места слева от текста, с равными
+// промежутками; подсветка и разделители отступают от краёв меню одинаково
 sealed class FlatRenderer : ToolStripProfessionalRenderer
 {
+    const int Inset = 4;   // отступ подсветки пункта и разделителей от краёв меню
+
     public readonly bool Dark;
     readonly Color back, border, hover, fore, foreDisabled, line;
+    Bitmap check;   // галочка, нарисованная под размер значков меню
+
+    public Color Fore { get { return fore; } }   // цвет текста — им же рисуются значки пунктов
 
     public FlatRenderer(bool dark)
     {
@@ -1420,7 +1576,7 @@ sealed class FlatRenderer : ToolStripProfessionalRenderer
     {
         ToolStripItem item = e.Item;
         if (!item.Enabled || !(item.Selected || item.Pressed)) return;
-        Rectangle r = new Rectangle(3, 1, item.Width - 6, item.Height - 2);
+        Rectangle r = new Rectangle(Inset, 1, item.Width - 2 * Inset, item.Height - 2);
         Graphics g = e.Graphics;
         SmoothingMode oldMode = g.SmoothingMode;
         g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -1430,10 +1586,72 @@ sealed class FlatRenderer : ToolStripProfessionalRenderer
         g.SmoothingMode = oldMode;
     }
 
+    // Иконки и галочки рисуются вместе с текстом, а не здесь: только при выводе текста известно,
+    // где он начинается, и значки можно поставить посередине свободного места слева от него
+    protected override void OnRenderItemImage(ToolStripItemImageRenderEventArgs e)
+    {
+        if (!(e.Item is ToolStripMenuItem)) base.OnRenderItemImage(e);
+    }
+
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+    {
+        if (!(e.Item is ToolStripMenuItem)) base.OnRenderItemCheck(e);
+    }
+
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
+        ToolStripMenuItem item = e.Item as ToolStripMenuItem;
+        if (item != null && e.Text == item.Text) DrawLeftColumn(e.Graphics, item, e.ToolStrip, e.TextRectangle.Left);
         TextRenderer.DrawText(e.Graphics, e.Text, e.TextFont, e.TextRectangle,
             e.Item.Enabled ? fore : foreDisabled, e.TextFormat);
+    }
+
+    // Свободное место слева от текста — от края подсветки до начала текста. В нём одна ячейка
+    // (иконка или галочка) или две (галочка и превью, как в меню «Значок»), и промежутки
+    // между краем, ячейками и текстом одинаковые
+    void DrawLeftColumn(Graphics g, ToolStripMenuItem item, ToolStrip strip, int textLeft)
+    {
+        Image image = item.Image;
+        if (image == null && !item.Checked) return;
+        // Картинка шириной в две ячейки (см. TwoCells) — это галочка и превью; иначе ячейка одна
+        Size area = image != null && image.Width >= 2 * image.Height ? image.Size : strip.ImageScalingSize;
+        bool twoCells = area.Width >= 2 * area.Height;
+        Size cell = new Size(area.Height, area.Height);
+        int cells = twoCells ? 2 : 1;
+        float gap = Math.Max(0f, (textLeft - Inset - cells * cell.Width) / (float)(cells + 1));
+        int y = (item.Height - cell.Height) / 2;
+        Rectangle first = new Rectangle((int)Math.Round(Inset + gap), y, cell.Width, cell.Height);
+        Rectangle second = new Rectangle((int)Math.Round(Inset + 2 * gap + cell.Width), y, cell.Width, cell.Height);
+
+        if (twoCells)
+        {
+            if (item.Checked) DrawCheck(g, first);
+            g.DrawImage(image, second, new Rectangle(image.Width - cell.Width, 0, cell.Width, cell.Height), GraphicsUnit.Pixel);
+        }
+        else if (item.Checked) DrawCheck(g, first);
+        else DrawImage(g, image, first);
+    }
+
+    // Размер поля под картинки для меню с двумя ячейками: галочка, промежуток, превью
+    public static Size TwoCells(Size cell)
+    {
+        return new Size(2 * cell.Width + (int)Math.Round(cell.Width * 0.4), cell.Height);
+    }
+
+    void DrawCheck(Graphics g, Rectangle r)
+    {
+        if (check == null || check.Width != r.Width)
+        {
+            if (check != null) check.Dispose();
+            check = MenuIcons.Check(r.Width, fore);
+        }
+        g.DrawImage(check, r);
+    }
+
+    static void DrawImage(Graphics g, Image image, Rectangle r)
+    {
+        if (image.Width != r.Width || image.Height != r.Height) g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        g.DrawImage(image, r);
     }
 
     protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
@@ -1445,13 +1663,7 @@ sealed class FlatRenderer : ToolStripProfessionalRenderer
     protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
     {
         int y = e.Item.Height / 2;
-        using (Pen pen = new Pen(line)) e.Graphics.DrawLine(pen, 8, y, e.Item.Width - 8, y);
-    }
-
-    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
-    {
-        TextRenderer.DrawText(e.Graphics, "\u2713", e.Item.Font, e.ImageRectangle, fore,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        using (Pen pen = new Pen(line)) e.Graphics.DrawLine(pen, Inset, y, e.Item.Width - Inset - 1, y);
     }
 
     static GraphicsPath RoundedRect(Rectangle r, int radius)
@@ -1549,6 +1761,140 @@ static class Shell
         }
         catch (System.ComponentModel.Win32Exception) { }   // эту ошибку Windows уже показала сама
         catch (Exception ex) { Log.Error("Открытие " + path, ex); }
+    }
+}
+
+// Где показывать меню значка. Windows сообщает, где на экране значок программы в трее и где
+// проходит панель задач; меню ставится к краю панели задач и к краю значка
+static class TrayPlacement
+{
+    public const int EdgeLeft = 0, EdgeTop = 1, EdgeRight = 2, EdgeBottom = 3;   // как ABE_* в Windows
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct RECT { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct NOTIFYICONIDENTIFIER
+    {
+        public uint cbSize;
+        public IntPtr hWnd;
+        public uint uID;
+        public Guid guidItem;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct APPBARDATA
+    {
+        public uint cbSize;
+        public IntPtr hWnd;
+        public uint uCallbackMessage;
+        public uint uEdge;
+        public RECT rc;
+        public IntPtr lParam;
+    }
+
+    [DllImport("shell32.dll")]
+    static extern int Shell_NotifyIconGetRect(ref NOTIFYICONIDENTIFIER identifier, out RECT iconLocation);
+
+    [DllImport("shell32.dll")]
+    static extern IntPtr SHAppBarMessage(uint message, ref APPBARDATA data);
+
+    const uint ABM_GETTASKBARPOS = 5;
+
+    // Закрытые поля NotifyIcon: скрытое окно, которое получает щелчки по значку, и номер значка
+    static readonly FieldInfo windowField = typeof(NotifyIcon).GetField("window", BindingFlags.Instance | BindingFlags.NonPublic);
+    static readonly FieldInfo idField = typeof(NotifyIcon).GetField("id", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    // Окно значка; IntPtr.Zero — если его не удалось найти
+    public static IntPtr TrayWindow(NotifyIcon tray)
+    {
+        try
+        {
+            NativeWindow window = windowField == null ? null : windowField.GetValue(tray) as NativeWindow;
+            return window == null ? IntPtr.Zero : window.Handle;
+        }
+        catch { return IntPtr.Zero; }
+    }
+
+    // Значок в трее на экране; Rectangle.Empty — если Windows его не сообщила (например, значок спрятан под ^)
+    public static Rectangle IconRect(NotifyIcon tray)
+    {
+        try
+        {
+            IntPtr hwnd = TrayWindow(tray);
+            if (hwnd == IntPtr.Zero || idField == null) return Rectangle.Empty;
+            NOTIFYICONIDENTIFIER id = new NOTIFYICONIDENTIFIER();
+            id.cbSize = (uint)Marshal.SizeOf(typeof(NOTIFYICONIDENTIFIER));
+            id.hWnd = hwnd;
+            id.uID = (uint)(int)idField.GetValue(tray);
+            RECT r;
+            if (Shell_NotifyIconGetRect(ref id, out r) != 0) return Rectangle.Empty;
+            return Rectangle.FromLTRB(r.Left, r.Top, r.Right, r.Bottom);
+        }
+        catch { return Rectangle.Empty; }   // старая Windows или NotifyIcon устроен иначе
+    }
+
+    // Панель задач: где она и к какому краю экрана прикреплена
+    static bool Taskbar(out Rectangle bounds, out int edge)
+    {
+        bounds = Rectangle.Empty;
+        edge = EdgeBottom;
+        try
+        {
+            APPBARDATA data = new APPBARDATA();
+            data.cbSize = (uint)Marshal.SizeOf(typeof(APPBARDATA));
+            if (SHAppBarMessage(ABM_GETTASKBARPOS, ref data) == IntPtr.Zero) return false;
+            bounds = Rectangle.FromLTRB(data.rc.Left, data.rc.Top, data.rc.Right, data.rc.Bottom);
+            edge = (int)data.uEdge;
+            return bounds.Width > 0 && bounds.Height > 0;
+        }
+        catch { return false; }
+    }
+
+    // Где поставить меню размера size, открытое от значка anchor
+    public static Point MenuLocation(Rectangle anchor, Size size, bool growLeft)
+    {
+        Screen screen = Screen.FromRectangle(anchor);
+        Rectangle taskbar;
+        int edge;
+        if (!Taskbar(out taskbar, out edge) || !taskbar.IntersectsWith(screen.Bounds))
+        {
+            // Панели задач на этом экране не нашлось — считаем, что она внизу, под рабочей областью
+            taskbar = Rectangle.FromLTRB(screen.Bounds.Left, screen.WorkingArea.Bottom, screen.Bounds.Right, screen.Bounds.Bottom);
+            edge = EdgeBottom;
+        }
+        return MenuLocation(anchor, size, growLeft, taskbar, edge, screen.WorkingArea);
+    }
+
+    // Само правило. Панель задач внизу: нижний край меню — на верхнем крае панели, а если значок
+    // выше неё (в списке скрытых значков) — над значком. По горизонтали меню папки (growLeft)
+    // стоит правым краем над правым краем значка, служебное — левым краем над левым.
+    // Панель сверху или сбоку — то же самое от её края. Меню не выходит за рабочую область экрана
+    public static Point MenuLocation(Rectangle anchor, Size size, bool growLeft, Rectangle taskbar, int edge, Rectangle area)
+    {
+        int x, y;
+        switch (edge)
+        {
+            case EdgeTop:
+                x = growLeft ? anchor.Right - size.Width : anchor.Left;
+                y = Math.Max(taskbar.Bottom, anchor.Bottom);
+                break;
+            case EdgeLeft:
+                x = Math.Max(taskbar.Right, anchor.Right);
+                y = growLeft ? anchor.Bottom - size.Height : anchor.Top;
+                break;
+            case EdgeRight:
+                x = Math.Min(taskbar.Left, anchor.Left) - size.Width;
+                y = growLeft ? anchor.Bottom - size.Height : anchor.Top;
+                break;
+            default:
+                x = growLeft ? anchor.Right - size.Width : anchor.Left;
+                y = Math.Min(taskbar.Top, anchor.Top) - size.Height;
+                break;
+        }
+        x = Math.Max(area.Left, Math.Min(x, area.Right - size.Width));
+        y = Math.Max(area.Top, Math.Min(y, area.Bottom - size.Height));
+        return new Point(x, y);
     }
 }
 
