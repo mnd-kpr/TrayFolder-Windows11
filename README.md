@@ -4,7 +4,7 @@
 
 ![Four icon styles in the system tray, in the dark and light themes](docs/icons.png)
 
-A single C# source file that builds with the compiler already built into Windows. Nothing to install and no dependencies, and the ready exe is about 55 KB.
+A single C# source file that builds with the compiler already built into Windows. Nothing to install and no dependencies, and the ready exe is about 60 KB.
 
 The code was written with [Claude](https://claude.ai), Anthropic's AI assistant. See [How it was made](#how-it-was-made) for details.
 
@@ -75,7 +75,7 @@ If you spot a mistake in the translation into your language, please open an [iss
 
 **TrayFolder bringt die Ordner-Symbolleisten der Windows-10-Taskleiste zurück in Windows 11.** Das Programm legt ein Ordnersymbol neben die Uhr. Ein Klick darauf öffnet den Inhalt des Ordners als verschachteltes Menü, genau wie der alte Pfeil » der Symbolleisten.
 
-- Eine einzige C#-Quelldatei, die mit dem in Windows enthaltenen C#-Compiler gebaut wird: `build.bat` starten, nichts installieren. Die exe ist etwa 55 KB groß.
+- Eine einzige C#-Quelldatei, die mit dem in Windows enthaltenen C#-Compiler gebaut wird: `build.bat` starten, nichts installieren. Die exe ist etwa 60 KB groß.
 - Namen, Symbole, versteckte Dateien und Sortierung wie im Datei-Explorer, ein Symbol pro Ordner, helle und dunkle Menüs passend zur Taskleiste, vier einfarbige, im Code gezeichnete Symbolvarianten.
 - Langsame Netzwerkordner und riesige Ordner werden im Hintergrund geladen. Ein nicht verfügbarer Ordner bekommt ein abgeblendetes Symbol.
 - Fertige, nicht signierte exe-Dateien liegen unter [Releases](../../releases). GitHub Actions baut sie aus genau diesem Quellcode.
@@ -89,7 +89,7 @@ Lizenz: [MIT](LICENSE).
 
 **TrayFolder devuelve a Windows 11 las barras de herramientas de carpetas de la barra de tareas de Windows 10.** El programa coloca un icono de carpeta junto al reloj. Al hacer clic en él, el contenido de la carpeta se abre como un menú en cascada, igual que la antigua flecha » de las barras de herramientas.
 
-- Un único archivo de código fuente en C# que se compila con el compilador de C# incluido en Windows: ejecute `build.bat`, no hay nada que instalar. El exe ocupa unos 55 KB.
+- Un único archivo de código fuente en C# que se compila con el compilador de C# incluido en Windows: ejecute `build.bat`, no hay nada que instalar. El exe ocupa unos 60 KB.
 - Nombres, iconos, archivos ocultos y orden como en el Explorador de archivos, un icono por carpeta, menús claros u oscuros a juego con la barra de tareas y cuatro estilos de icono monocromos dibujados por código.
 - Las carpetas de red lentas y las carpetas enormes se cargan en segundo plano, y el icono de una carpeta no disponible se atenúa.
 - En [Releases](../../releases) hay ejecutables listos para usar, sin firma digital, que GitHub Actions compila a partir de este mismo código.
@@ -103,7 +103,7 @@ Licencia: [MIT](LICENSE).
 
 **TrayFolder ramène dans Windows 11 les barres d'outils de dossiers de la barre des tâches de Windows 10.** Le programme place une icône de dossier à côté de l'horloge : un clic dessus ouvre le contenu du dossier sous forme de menu en cascade, comme l'ancienne flèche » des barres d'outils.
 
-- Un seul fichier source C#, compilé avec le compilateur C# fourni avec Windows : lancez `build.bat`, rien à installer. L'exe pèse environ 55 Ko.
+- Un seul fichier source C#, compilé avec le compilateur C# fourni avec Windows : lancez `build.bat`, rien à installer. L'exe pèse environ 60 Ko.
 - Noms, icônes, fichiers cachés et tri identiques à ceux de l'Explorateur de fichiers, une icône par dossier, menus clairs ou sombres assortis à la barre des tâches, quatre styles d'icône monochromes dessinés par le code.
 - Les dossiers réseau lents et les très gros dossiers se chargent en arrière-plan. L'icône d'un dossier indisponible est grisée.
 - Des exécutables prêts à l'emploi, non signés, se trouvent dans [Releases](../../releases). GitHub Actions les compile à partir de ce même code.
@@ -117,7 +117,7 @@ Licence : [MIT](LICENSE).
 
 **TrayFolder riporta in Windows 11 le barre degli strumenti con le cartelle della barra delle applicazioni di Windows 10.** Il programma mette un'icona di cartella accanto all'orologio: un clic e il contenuto della cartella si apre come menu a cascata, proprio come la vecchia freccia » delle barre degli strumenti.
 
-- Un unico file sorgente C# che si compila con il compilatore C# incluso in Windows: avvia `build.bat`, non serve installare nulla. L'exe pesa circa 55 KB.
+- Un unico file sorgente C# che si compila con il compilatore C# incluso in Windows: avvia `build.bat`, non serve installare nulla. L'exe pesa circa 60 KB.
 - Nomi, icone, file nascosti e ordinamento come in Esplora file, un'icona per cartella, menu chiari o scuri in tinta con la barra delle applicazioni, quattro stili di icona monocromatici disegnati dal codice.
 - Le cartelle di rete lente e quelle enormi vengono lette in background, e l'icona di una cartella non disponibile viene attenuata.
 - Gli eseguibili pronti, senza firma digitale, sono in [Releases](../../releases): li compila GitHub Actions da questo stesso codice.
@@ -131,7 +131,7 @@ Licenza: [MIT](LICENSE).
 
 **TrayFolder возвращает в Windows 11 панели инструментов с папками, которые были на панели задач Windows 10.** Программа ставит значок папки рядом с часами, а клик по нему раскрывает содержимое папки каскадным меню, как стрелка » у старых панелей.
 
-- Один файл исходника на C#, который собирается компилятором C#, встроенным в Windows: запустите `build.bat`, ничего устанавливать не нужно. Готовый exe занимает около 55 КБ.
+- Один файл исходника на C#, который собирается компилятором C#, встроенным в Windows: запустите `build.bat`, ничего устанавливать не нужно. Готовый exe занимает около 60 КБ.
 - Имена, иконки, скрытые файлы и сортировка — как в Проводнике. Каждая папка — отдельный значок. Меню светлое или тёмное в тон панели задач, на выбор четыре монохромных варианта значка, нарисованных кодом.
 - Медленные сетевые и огромные папки читаются в фоне, а значок недоступной папки становится приглушённым.
 - Готовый exe без цифровой подписи лежит в [Releases](../../releases). Его собирает GitHub Actions из этого же кода.
